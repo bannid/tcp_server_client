@@ -4,6 +4,7 @@
 #include <windows.h>
 #include <thread>
 #include <mutex>
+#include <atomic>
 #include <vector>
 #include <iostream>
 #include <string>
@@ -31,12 +32,13 @@ namespace net_server {
 		bool start(const char* PortNumber);
 		bool listen_on_port();
 		void stop();
+		void cleanup();
 		bool send_message(tcp_common::client Client,
 			std::vector<unsigned char> msg);
 		void brodcast_message();
 		void add_client(tcp_common::client Client);
 		void close_inactive_clients();
-		
+		void close_all_clients();
 		void set_client_game(int ClientId, int GameId);
 		void set_client_game_thread_unsafe(int ClientId, int GameId);
 		
@@ -53,8 +55,8 @@ namespace net_server {
 		errors Error;
 		int ErrorCode;
 
-	private:
-		bool Running = true;
+	public:
+		std::atomic<bool> Running = true;
 	public:
 		int ClientId = 0;
 		int GameId = 0;
@@ -111,13 +113,12 @@ namespace net_server {
 		this->MessageProcessingThread = std::thread(process_messages, this);
 		SOCKADDR_IN AddrIn;
 		int AddrLength = sizeof(AddrIn);
-		while (Running) {
+		while (this->Running.load() == true) {
 			ErrorCode = listen(ListenSocket, SOMAXCONN);
 			if (ErrorCode == SOCKET_ERROR) {
 				Error = errors::LISTEN_FAILED;
 				ErrorCode = WSAGetLastError();
 				closesocket(ListenSocket);
-				WSACleanup();
 				return false;
 			}
 			// Accept a client socket
@@ -125,7 +126,6 @@ namespace net_server {
 			if (ClientSocket == INVALID_SOCKET) {
 				Error = errors::ACCEPT_FAILED;
 				closesocket(ListenSocket);
-				WSACleanup();
 				return false;
 			}
 			u_long mode = 1;
@@ -134,7 +134,6 @@ namespace net_server {
 				Error = errors::ASYNC_CREATION_FAILED;
 				ErrorCode = WSAGetLastError();
 				closesocket(ListenSocket);
-				WSACleanup();
 				return false;
 			}
 			tcp_common::client Client;
@@ -225,10 +224,32 @@ namespace net_server {
 			this->Clients.erase(*It);
 		}
 	}
+	void server::close_all_clients() {
+		std::lock_guard<std::mutex> LocalGuard(this->ClientsMutex);
+		std::vector<std::vector<tcp_common::client>::iterator> IteratorsToRemove;
+		for (auto ClientIt = this->Clients.begin(); ClientIt != this->Clients.end(); ClientIt++) {
+			if (!ClientIt->Active) {
+				if (ClientIt->ClosedGracefully) {
+					shutdown(ClientIt->Socket, SD_SEND);
+				}
+				closesocket(ClientIt->Socket);
+			}
+			else{
+				shutdown(ClientIt->Socket, SD_SEND);
+				closesocket(ClientIt->Socket);
+			}
+		}
+	}
 	void server::stop() {
 		//TODO: Stop all the clients sockets as well
-		closesocket(ListenSocket);
+		this->Running = false;
+		this->ClientProcessingThread.join();
+		this->MessageProcessingThread.join();
+		close_all_clients();
 		WSACleanup();
+	}
+	void server::cleanup() {
+		
 	}
 	void server::add_client(tcp_common::client Client) {
 		std::lock_guard<std::mutex> LocalGuard(this->ClientsMutex);
@@ -260,7 +281,7 @@ namespace net_server {
 	}
 	//Running on seprate thread.
 	static void process_clients(server * Server) {
-		while (1) {
+		while (Server->Running.load()) {
 			auto Size = Server->Clients.size();
 			for (int i = 0; i < Size; i++) {
 				if (!Server->Clients[i].Active) {
@@ -311,7 +332,7 @@ namespace net_server {
 		}
 	}
 	static void process_messages(server * Server) {
-		while (1) {
+		while (Server->Running.load()) {
 			tcp_common::msg Message;
 			if (Server->Messages.size() > 0) {
 				Server->MessageMutex.lock();

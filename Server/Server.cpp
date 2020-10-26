@@ -11,12 +11,15 @@ int main(void) {
 		if (success) {
 			Server.listen_on_port();
 		}
+		std::cout << "Exiting thread..";
 	});
 	//Temp code to debug server
-	while (1) {
+	while (Server.Running.load()) {
 		int UserAnswer;
 		const char* Menu = "Enter one of the following options:\n"
-			"1. Send number of clients to all clients";
+			"1. Send number of clients to all clients\n"
+			"2. Total number of clients\n"
+			"3. Exit the server.";
 		std::cout << Menu << std::endl;
 		std::cin >> UserAnswer;
 		switch (UserAnswer) {
@@ -24,8 +27,16 @@ int main(void) {
 			Server.brodcast_message();
 			break;
 		}
+		case 2: {
+			std::cout << "Total number of clients is: " << Server.Clients.size() << std::endl;
+			break;
+		}
+		case 3: {
+			std::cout << "Stopping the server.." << std::endl;
+			Server.stop();
+			break;
+		}
 		}
 	}
 	Thread.join();
-	Server.stop();
 }
