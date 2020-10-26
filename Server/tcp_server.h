@@ -9,6 +9,7 @@
 #include <vector>
 #include <iostream>
 #include <string>
+#include <deque>
 #include "tcp_common.h"
 // Need to link with Ws2_32.lib
 #pragma comment (lib, "Ws2_32.lib")
@@ -26,10 +27,12 @@ namespace net_server {
 		SOCKET Socket;
 		int Id;
 		bool Active = true;
+		std::vector<unsigned char> ByteStream;
 	};
 	struct msg {
-		client* Client;//Client who owns the message.
-		std::vector<char> MsgBody;
+		tcp_common::message_type Header;
+		std::vector<unsigned char> MsgBody;
+		client* Client;
 	};
 	class server;
 	static void process_messages(server * Server);
@@ -39,8 +42,8 @@ namespace net_server {
 		bool start(const char* PortNumber);
 		bool listen_on_port();
 		void stop();
-		void send_message(client Client);
-		void send_message(int Id);
+		bool send_message(client* Client);
+		bool send_message(int Id);
 		void brodcast_message();
 	private:
 		WSADATA WSAData;
@@ -50,16 +53,17 @@ namespace net_server {
 		struct addrinfo Hints;
 		errors Error;
 		int ErrorCode;
+		int ClientId = 0;
 	private:
 		bool Running = true;
-	private:
+	public:
 		std::thread ClientProcessingThread;
 		std::thread MessageProcessingThread;
 	public:
 		std::mutex ClientsMutex;
-		std::mutex MessagesMutex;
 		std::vector<client> Clients;
-		std::vector<msg> Messages;
+		std::mutex MessageMutex;
+		std::deque<msg> Messages;
 	};
 	bool server::start(const char* portNumber) {
 		ErrorCode = WSAStartup(MAKEWORD(2, 2), &WSAData);
@@ -130,8 +134,7 @@ namespace net_server {
 				return false;
 			}
 			client Client;
-			//TODO: Create a system to create unique ids.
-			Client.Id = this->Clients.size();
+			Client.Id = this->ClientId++;
 			Client.Socket = ClientSocket;
 			this->Clients.push_back(Client);
 			this->brodcast_message();
@@ -146,19 +149,29 @@ namespace net_server {
 	void server::brodcast_message() {
 		this->ClientsMutex.lock();
 		for (int i = 0; i < this->Clients.size(); i++) {
-			if (!this->Clients[i].Active)continue;
-			int SendResult;
-			std::string Message = "We have ";
-			Message.append(std::to_string(this->Clients.size()));
-			Message.append(" clients\r\n");
-			SendResult = send(this->Clients[i].Socket, Message.data(), Message.size(), 0);
-			if (SendResult == SOCKET_ERROR) {
-				std::cout << "Send failed with error: " << WSAGetLastError();
-				closesocket(this->Clients[i].Socket);
-				this->Clients[i].Active = false;
-			}
+			client * Client = &this->Clients[i];
+			if (!Client->Active)continue;
+			this->send_message(Client);
 		}
 		this->ClientsMutex.unlock();
+	}
+
+	bool server::send_message(client* Client) {
+		std::string Message("Acknowledged");
+		int BytesToSend = Message.size();
+		unsigned char* Ptr = (unsigned char*)Message.data();
+		int BytesSent = 0;
+		while (BytesSent < BytesToSend) {
+			BytesSent = send(Client->Socket, (const char*)Ptr, BytesToSend - BytesSent, 0);
+			if (BytesSent == SOCKET_ERROR) {
+				std::cout << "Send failed with error: " << WSAGetLastError();
+				closesocket(Client->Socket);
+				Client->Active = false;
+				return false;
+			}
+			Ptr += BytesSent;
+		}
+		return true;
 	}
 
 	static void process_clients(server * Server) {
@@ -173,22 +186,17 @@ namespace net_server {
 				char recvbuf[512];
 				int recvbuflen = 512;
 				SOCKET ClientSocket = Server->Clients[i].Socket;
-				int Result;
+
+				int Result = 0;
 				Result = recv(ClientSocket, recvbuf, recvbuflen, 0);
-				int lastError = WSAGetLastError();
 				if (Result > 0) {
-					msg Message;
-					for (int i = 0; i < Result; i++) {
-						std::cout << recvbuf[i];
-						Message.MsgBody.push_back(recvbuf[i]);
+					std::string temp(recvbuf, Result);
+					std::cout << "[Debug]" << temp.c_str();
+					for (int j = 0; j < Result; j++) {
+						unsigned char Byte = recvbuf[j];
+						Server->Clients[i].ByteStream.push_back(Byte);
 					}
-					Message.Client = &Server->Clients[i];
-					Server->MessagesMutex.lock();
-					Server->Messages.push_back(Message);
-					Server->MessagesMutex.unlock();
-
 				}
-
 				else if (Result == 0) {
 					std::cout << "Connection closing...\n";
 					shutdown(ClientSocket, SD_SEND);
@@ -200,30 +208,59 @@ namespace net_server {
 					Server->Clients[i].Active = false;
 					closesocket(ClientSocket);
 				}
+				if (Server->Clients[i].Active) {
+					while (Server->Clients[i].ByteStream.size() >= tcp_common::SIZE_OF_MESSAGE) {
+						int HeaderSize = sizeof(tcp_common::message_type);
+						msg Message;
+						Message.Header = (tcp_common::message_type)Server->Clients[i].ByteStream[0];
+						for (int k = HeaderSize; k < tcp_common::SIZE_OF_MESSAGE; k++) {
+							Message.MsgBody.push_back(Server->Clients[i].ByteStream[k]);
+						}
+						Message.Client = &Server->Clients[i];
+						Server->MessageMutex.lock();
+						Server->Messages.push_back(Message);
+						Server->MessageMutex.unlock();
+						auto Begin = Server->Clients[i].ByteStream.begin();
+						Server->Clients[i].ByteStream.erase(Begin, Begin + tcp_common::SIZE_OF_MESSAGE);
+					}
+				}
 			}
-			Sleep(100);
+			Sleep(1);
 		}
 	}
 	static void process_messages(server * Server) {
 		while (1) {
-			for (int i = 0; i < Server->Messages.size(); i++) {
-				uint8_t MsgType;
-				MsgType = (uint8_t)Server->Messages[i].MsgBody[0];
-				switch (MsgType) {
-				case tcp_common::MARK: {
-					std::cout << "Mark message received" << std::endl;
+			msg Message;
+			if (Server->Messages.size() > 0) {
+				Server->MessageMutex.lock();
+				Message = *Server->Messages.begin();
+				Server->Messages.pop_front();
+				Server->MessageMutex.unlock();
+				tcp_common::message_type Header = Message.Header;
+				switch (Header) {
+				case tcp_common::message_type::CREATE_GAME: {
+					std::cout << "Create game message received";
 					break;
 				}
-				case tcp_common::CREATE_GAME: {
-					std::cout << "Create game message received" << std::endl;
+				case tcp_common::message_type::MARK: {
+					std::cout << "Mark message received"<<std::endl;
+					int x = 0;
+					int y = 0;
+					for (int i = 0; i < 4; i++) {
+						int temp = (int)Message.MsgBody[i];
+						int temp2 = (int)Message.MsgBody[i + 4];
+						temp = temp << (i*8);
+						temp2 = temp2 << (i * 8);
+						x = x | temp;
+						y = y | temp2;
+					}
+					std::cout << "value of x is " << x << std::endl;
+					std::cout << "value of y is " << y << std::endl;
 					break;
 				}
 				}
-				Server->MessagesMutex.lock();
-				Server->Messages.erase(Server->Messages.begin() + i);
-				Server->MessagesMutex.unlock();
 			}
-			Sleep(10);
+			Sleep(1);
 		}
 	}
 }

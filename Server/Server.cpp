@@ -14,10 +14,12 @@ int main(void) {
 	});
 	//Temp code to debug server
 	while (1) {
-		int userAnswer;
-		std::cout << "Enter something" << std::endl;
-		std::cin >> userAnswer;
-		switch (userAnswer) {
+		int UserAnswer;
+		const char* Menu = "Enter one of the following options:\n"
+			"1. Send number of clients to all clients";
+		std::cout << Menu << std::endl;
+		std::cin >> UserAnswer;
+		switch (UserAnswer) {
 		case 1: {
 			Server.brodcast_message();
 			break;

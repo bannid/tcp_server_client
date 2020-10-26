@@ -14,6 +14,7 @@
 #pragma comment (lib, "Ws2_32.lib")
 #pragma comment (lib, "Mswsock.lib")
 #pragma comment (lib, "AdvApi32.lib")
+
 namespace net_client {
 	enum errors {
 
@@ -22,7 +23,7 @@ namespace net_client {
 	public:
 		bool initialize();
 		bool connect_to_server(const char* IpAddress,const char* PortNumber);
-		bool send_message(std::vector<char> Message);
+		bool send_message(std::vector<unsigned char > Message);
 		bool listen_on_port();
 		void stop();
 	private:
@@ -76,13 +77,21 @@ namespace net_client {
 		}
 		return true;
 	}
-	bool client::send_message(std::vector<char> Message) {
-		// Send an initial buffer
-		int ErrorCode = send(ConnectSocket, (const char*)Message.data(), Message.size(), 0);
-		if (ErrorCode == SOCKET_ERROR) {
-			printf("send failed with error: %d\n", WSAGetLastError());
-			return false;
+	bool client::send_message(std::vector<unsigned char> Message) {
+		unsigned char * Ptr = (unsigned char*)Message.data();
+		uint32_t Size = Message.size();
+		uint32_t BytesSent = 0;
+		while (BytesSent < Size) {
+			// Send an initial buffer
+			int ErrorCode = send(ConnectSocket,(char*) Ptr, Size - BytesSent, 0);
+			if (ErrorCode == SOCKET_ERROR) {
+				printf("send failed with error: %d\n", WSAGetLastError());
+				return false;
+			}
+			BytesSent += ErrorCode;
+			Ptr += ErrorCode;
 		}
+		std::cout << "Bytes sent: " << BytesSent << std::endl;
 		return true;
 	}
 	bool client::listen_on_port() {

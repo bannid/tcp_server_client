@@ -3,30 +3,28 @@
 #include <stdint.h>
 
 namespace tcp_common {
-	enum message_type : uint8_t{
+	enum message_type : uint8_t {
 		CREATE_GAME,
+		GAME_CREATED,
+		GAME_FINISHED,
+		WINNER,
+		DRAW,
+		OTHER_PLAYER_LEFT,
 		MARK,
 		QUIT_GAME
 	};
+	const int SIZE_OF_MESSAGE = sizeof(message_type) + sizeof(int) * 2;
 	template<typename DataType>
-	std::vector<char> create_message(message_type MessageType,std::vector<DataType> Data ) {
-		std::vector<char> ToReturn;
-		switch (MessageType) {
-		case message_type::MARK: {
-			ToReturn.push_back(message_type::MARK);
-			for (int i = 0; i < Data.size(); i++) {
-				char* DataTemp = (char*)&Data[i];
-				for (int j = 0; j < sizeof(DataType); j++) {
-					ToReturn.push_back(*DataTemp);
-					DataTemp++;
-				}
-			}
-			return ToReturn;
+	std::vector<unsigned char> create_message(message_type MessageType, std::vector<DataType> Data) {
+		std::vector<unsigned char> ToReturn;
+		ToReturn.push_back(MessageType);
+		unsigned char* DataTemp = (unsigned char*)&Data[0];
+		for (int j = 0; j < SIZE_OF_MESSAGE - sizeof(message_type); j++) {
+			ToReturn.push_back(*DataTemp);
+			DataTemp++;
 		}
-		default: {
-			ToReturn.push_back(MessageType);
-			return ToReturn;
-		}
-		}
+		std::cout << "[Debug] Size of message is " << ToReturn.size() << std::endl;
+		return ToReturn;
+
 	}
 }
