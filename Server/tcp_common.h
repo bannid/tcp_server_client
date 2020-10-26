@@ -1,21 +1,39 @@
 #pragma once
-#include<vector>
+#include <windows.h>
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include <vector>
 #include <stdint.h>
-
+#pragma comment (lib, "Ws2_32.lib")
+#pragma comment (lib, "Mswsock.lib")
+#pragma comment (lib, "AdvApi32.lib")
 namespace tcp_common {
 	enum message_type : uint8_t {
-		CREATE_GAME,
-		GAME_CREATED,
-		GAME_FINISHED,
-		WINNER,
-		DRAW,
-		OTHER_PLAYER_LEFT,
-		MARK,
-		QUIT_GAME
+		CREATE_GAME, //No msg body
+		GAME_CREATED, //Need to send the game id.
+		GAME_ALREADY_EXISTS,//Need to send the game id.
+		GAME_FINISHED,//No msg body.
+		WINNER,//No message needed
+		DRAW,//No msg body
+		LOSER,//No msg body
+		OTHER_PLAYER_LEFT,//No msg body
+		MARK,//Need to send the x and y coords
+		QUIT_GAME//No msg body
 	};
 	const int SIZE_OF_MESSAGE = sizeof(message_type) + sizeof(int) * 2;
-	template<typename DataType>
-	std::vector<unsigned char> create_message(message_type MessageType, std::vector<DataType> Data) {
+	struct client {
+		SOCKET Socket;
+		int Id;
+		bool Active = true;
+		std::vector<unsigned char> ByteStream;
+		int GameId = -1;
+	};
+	struct msg {
+		tcp_common::message_type Header;
+		std::vector<unsigned char> MsgBody;
+		int ClientId;
+	};
+	std::vector<unsigned char> create_message(message_type MessageType, std::vector<int> Data) {
 		std::vector<unsigned char> ToReturn;
 		ToReturn.push_back(MessageType);
 		unsigned char* DataTemp = (unsigned char*)&Data[0];
@@ -26,5 +44,42 @@ namespace tcp_common {
 		std::cout << "[Debug] Size of message is " << ToReturn.size() << std::endl;
 		return ToReturn;
 
+	}
+
+	int parse_int_from_bytes(unsigned char* bytes) {
+		int ToReturn = 0;
+		for (int i = 0; i < 4; i++) {
+			int temp = (int)bytes[i];
+			temp = temp << (i * 8);
+			ToReturn = ToReturn | temp;
+		}
+		return ToReturn;
+	}
+
+	std::vector<int> decode_data(message_type MessageType, std::vector<unsigned char> data) {
+		std::vector<int> ToReturn;
+		switch (MessageType) {
+		case message_type::MARK: {
+			std::cout << "Mark message received" << std::endl;
+			int x = 0;
+			int y = 0;
+			x = parse_int_from_bytes(&data[0]);
+			y = parse_int_from_bytes(&data[4]);
+			std::cout << "value of x is " << x << std::endl;
+			std::cout << "value of y is " << y << std::endl;
+			ToReturn.push_back(x);
+			ToReturn.push_back(y);
+			return ToReturn;
+		}
+		case message_type::GAME_CREATED: {
+			std::cout << "Game created message received" << std::endl;
+			int GameId = 0;
+			GameId = parse_int_from_bytes(&data[0]);
+			std::cout << "Game ID is: " << GameId << std::endl;
+			ToReturn.push_back(GameId);
+			return ToReturn;
+
+		}
+		}
 	}
 }

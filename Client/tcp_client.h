@@ -1,41 +1,52 @@
 #pragma once
 #define WIN32_LEAN_AND_MEAN
 
-#include <windows.h>
-#include <winsock2.h>
-#include <ws2tcpip.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <iostream>
 #include <string>
 #include <vector>
+#include <map>
+#include <functional>
+#include <deque>
+#include <mutex>
+#include <thread>
 #include <tcp_common.h>
-
-#pragma comment (lib, "Ws2_32.lib")
-#pragma comment (lib, "Mswsock.lib")
-#pragma comment (lib, "AdvApi32.lib")
 
 namespace net_client {
 	enum errors {
 
 	};
+	typedef std::function<void(void)> event_callback;
+	class client;
+	static void process_messages(client * Client);
 	class client {
 	public:
 		bool initialize();
-		bool connect_to_server(const char* IpAddress,const char* PortNumber);
+		bool connect_to_server(const char* IpAddress, const char* PortNumber);
 		bool send_message(std::vector<unsigned char > Message);
 		bool listen_on_port();
 		void stop();
+		void on(tcp_common::message_type Type, std::function<void(void)> Callback);
 	private:
 		WSADATA wsaData;
 		SOCKET ConnectSocket = INVALID_SOCKET;
 		struct addrinfo *result = NULL,
 			hints;
+	public:
+		std::map <tcp_common::message_type, std::vector<event_callback>> MessageEvents;
+	public:
+		std::mutex MessagesMutex;
+		std::thread MessageProcessingThread;
+	public:
+		std::deque<tcp_common::msg> Messages;
+		std::vector<unsigned char> ByteStream;
 	private:
 		errors Error;
 		int ErrorCode;
 	};
 	bool client::initialize() {
+		this->MessageProcessingThread = std::thread(process_messages, this);
 		// Initialize Winsock
 		ErrorCode = WSAStartup(MAKEWORD(2, 2), &wsaData);
 		if (ErrorCode != 0) {
@@ -69,7 +80,7 @@ namespace net_client {
 			freeaddrinfo(result);
 			return false;
 		}
-		
+
 		freeaddrinfo(result);
 		if (ConnectSocket == INVALID_SOCKET) {
 			printf("Unable to connect to server!\n");
@@ -83,7 +94,7 @@ namespace net_client {
 		uint32_t BytesSent = 0;
 		while (BytesSent < Size) {
 			// Send an initial buffer
-			int ErrorCode = send(ConnectSocket,(char*) Ptr, Size - BytesSent, 0);
+			int ErrorCode = send(ConnectSocket, (char*)Ptr, Size - BytesSent, 0);
 			if (ErrorCode == SOCKET_ERROR) {
 				printf("send failed with error: %d\n", WSAGetLastError());
 				return false;
@@ -103,12 +114,10 @@ namespace net_client {
 
 			ErrorCode = recv(ConnectSocket, recvbuf, recvbuflen, 0);
 			if (ErrorCode > 0) {
-				std::string Message;
 				printf("Bytes received: %d\n", ErrorCode);
 				for (int i = 0; i < ErrorCode; i++) {
-					Message.push_back(recvbuf[i]);
+					this->ByteStream.push_back(recvbuf[i]);
 				}
-				std::cout << Message.c_str() << std::endl;
 			}
 			else if (ErrorCode == 0) {
 				printf("Connection closed\n");
@@ -117,6 +126,20 @@ namespace net_client {
 				printf("recv failed with error: %d\n", WSAGetLastError());
 				return false;
 			}
+			while (this->ByteStream.size() >= tcp_common::SIZE_OF_MESSAGE) {
+				int HeaderSize = sizeof(tcp_common::message_type);
+				tcp_common::msg Message;
+				Message.Header = (tcp_common::message_type)this->ByteStream[0];
+				for (int k = HeaderSize; k < tcp_common::SIZE_OF_MESSAGE; k++) {
+					Message.MsgBody.push_back(this->ByteStream[k]);
+				}
+				this->MessagesMutex.lock();
+				this->Messages.push_back(Message);
+				this->MessagesMutex.unlock();
+				auto Begin = this->ByteStream.begin();
+				this->ByteStream.erase(Begin, Begin + tcp_common::SIZE_OF_MESSAGE);
+			}
+
 
 		} while (ErrorCode > 0);
 		return true;
@@ -125,5 +148,50 @@ namespace net_client {
 		shutdown(ConnectSocket, SD_SEND);
 		closesocket(ConnectSocket);
 		WSACleanup();
+	}
+	void client::on(tcp_common::message_type MessageType, std::function<void(void)> Callback) {
+		bool found = false;
+		for (auto CallbackIt = this->MessageEvents.begin(); CallbackIt != this->MessageEvents.end(); CallbackIt++) {
+			if (CallbackIt->first == MessageType) {
+				CallbackIt->second.push_back(Callback);
+				found = true;
+				break;
+			}
+		}
+		if (!found) {
+			std::vector<event_callback> temp;
+			temp.push_back(Callback);
+			this->MessageEvents.insert({MessageType,temp});
+		}
+	}
+	static void process_messages(client * Client) {
+		while (1) {
+			tcp_common::msg Message;
+			if (Client->Messages.size() > 0) {
+				Client->MessagesMutex.lock();
+				Message = *Client->Messages.begin();
+				Client->Messages.pop_front();
+				Client->MessagesMutex.unlock();
+				tcp_common::message_type Header = Message.Header;
+				switch (Header) {
+				case tcp_common::message_type::GAME_CREATED: {
+					tcp_common::decode_data(Header, Message.MsgBody);
+					for (auto CallbackIt = Client->MessageEvents.begin(); CallbackIt != Client->MessageEvents.end(); CallbackIt++) {
+						if (CallbackIt->first == Header) {
+							for (auto CallbacksIt = CallbackIt->second.begin(); CallbacksIt != CallbackIt->second.end(); CallbacksIt++) {
+								(*CallbacksIt)();
+							}
+						}
+					}
+					break;
+				}
+				case tcp_common::message_type::MARK: {
+					tcp_common::decode_data(Header, Message.MsgBody);
+					break;
+				}
+				}
+			}
+			Sleep(1);
+		}
 	}
 }

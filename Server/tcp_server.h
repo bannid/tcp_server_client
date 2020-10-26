@@ -2,8 +2,6 @@
 #define WIN32_LEAN_AND_MEAN
 
 #include <windows.h>
-#include <winsock2.h>
-#include <ws2tcpip.h>
 #include <thread>
 #include <mutex>
 #include <vector>
@@ -11,8 +9,9 @@
 #include <string>
 #include <deque>
 #include "tcp_common.h"
+#include "Game.h"
 // Need to link with Ws2_32.lib
-#pragma comment (lib, "Ws2_32.lib")
+
 namespace net_server {
 	enum errors {
 		WSA_STARTUP_FAILED,
@@ -23,17 +22,7 @@ namespace net_server {
 		ACCEPT_FAILED,
 		ASYNC_CREATION_FAILED
 	};
-	struct client {
-		SOCKET Socket;
-		int Id;
-		bool Active = true;
-		std::vector<unsigned char> ByteStream;
-	};
-	struct msg {
-		tcp_common::message_type Header;
-		std::vector<unsigned char> MsgBody;
-		client* Client;
-	};
+	
 	class server;
 	static void process_messages(server * Server);
 	static void process_clients(server * Server);
@@ -42,8 +31,8 @@ namespace net_server {
 		bool start(const char* PortNumber);
 		bool listen_on_port();
 		void stop();
-		bool send_message(client* Client);
-		bool send_message(int Id);
+		bool send_message(int Id,
+			std::vector<unsigned char> msg);
 		void brodcast_message();
 	private:
 		WSADATA WSAData;
@@ -53,17 +42,22 @@ namespace net_server {
 		struct addrinfo Hints;
 		errors Error;
 		int ErrorCode;
-		int ClientId = 0;
+		
 	private:
 		bool Running = true;
 	public:
+		int ClientId = 0;
+		int GameId = 0;
 		std::thread ClientProcessingThread;
 		std::thread MessageProcessingThread;
 	public:
 		std::mutex ClientsMutex;
-		std::vector<client> Clients;
+		std::vector<tcp_common::client> Clients;
 		std::mutex MessageMutex;
-		std::deque<msg> Messages;
+		std::mutex GameCreationMessageMutex;
+		std::deque<tcp_common::msg> Messages;
+		std::deque<tcp_common::msg> GameCreationMessage;
+		std::vector<game::game_t> Games;
 	};
 	bool server::start(const char* portNumber) {
 		ErrorCode = WSAStartup(MAKEWORD(2, 2), &WSAData);
@@ -133,7 +127,7 @@ namespace net_server {
 				WSACleanup();
 				return false;
 			}
-			client Client;
+			tcp_common::client Client;
 			Client.Id = this->ClientId++;
 			Client.Socket = ClientSocket;
 			this->Clients.push_back(Client);
@@ -149,24 +143,31 @@ namespace net_server {
 	void server::brodcast_message() {
 		this->ClientsMutex.lock();
 		for (int i = 0; i < this->Clients.size(); i++) {
-			client * Client = &this->Clients[i];
+			tcp_common::client * Client = &this->Clients[i];
 			if (!Client->Active)continue;
-			this->send_message(Client);
+			//this->send_message(Client);
 		}
 		this->ClientsMutex.unlock();
 	}
 
-	bool server::send_message(client* Client) {
-		std::string Message("Acknowledged");
-		int BytesToSend = Message.size();
-		unsigned char* Ptr = (unsigned char*)Message.data();
+	bool server::send_message(int ClientId,std::vector<unsigned char> Msg) {
+		tcp_common::client Client;
+		this->ClientsMutex.lock();
+		for (auto ClientIt = this->Clients.begin(); ClientIt != this->Clients.end(); ClientIt++) {
+			if (ClientIt->Id == ClientId) {
+				Client = *ClientIt;
+			}
+		}
+		this->ClientsMutex.unlock();
+		int BytesToSend = Msg.size();
+		unsigned char* Ptr = (unsigned char*)Msg.data();
 		int BytesSent = 0;
 		while (BytesSent < BytesToSend) {
-			BytesSent = send(Client->Socket, (const char*)Ptr, BytesToSend - BytesSent, 0);
+			BytesSent = send(Client.Socket, (const char*)Ptr, BytesToSend - BytesSent, 0);
 			if (BytesSent == SOCKET_ERROR) {
 				std::cout << "Send failed with error: " << WSAGetLastError();
-				closesocket(Client->Socket);
-				Client->Active = false;
+				closesocket(Client.Socket);
+				Client.Active = false;
 				return false;
 			}
 			Ptr += BytesSent;
@@ -211,12 +212,12 @@ namespace net_server {
 				if (Server->Clients[i].Active) {
 					while (Server->Clients[i].ByteStream.size() >= tcp_common::SIZE_OF_MESSAGE) {
 						int HeaderSize = sizeof(tcp_common::message_type);
-						msg Message;
+						tcp_common::msg Message;
 						Message.Header = (tcp_common::message_type)Server->Clients[i].ByteStream[0];
 						for (int k = HeaderSize; k < tcp_common::SIZE_OF_MESSAGE; k++) {
 							Message.MsgBody.push_back(Server->Clients[i].ByteStream[k]);
 						}
-						Message.Client = &Server->Clients[i];
+						Message.ClientId = Server->Clients[i].Id;
 						Server->MessageMutex.lock();
 						Server->Messages.push_back(Message);
 						Server->MessageMutex.unlock();
@@ -230,35 +231,43 @@ namespace net_server {
 	}
 	static void process_messages(server * Server) {
 		while (1) {
-			msg Message;
+			tcp_common::msg Message;
 			if (Server->Messages.size() > 0) {
 				Server->MessageMutex.lock();
-				Message = *Server->Messages.begin();
+				auto MessageTemp = Server->Messages.begin();
+				Message.ClientId = MessageTemp->ClientId;
+				Message.MsgBody = MessageTemp->MsgBody;
+				Message.Header = MessageTemp->Header;
 				Server->Messages.pop_front();
 				Server->MessageMutex.unlock();
+				
 				tcp_common::message_type Header = Message.Header;
 				switch (Header) {
 				case tcp_common::message_type::CREATE_GAME: {
-					std::cout << "Create game message received";
+					Server->GameCreationMessage.push_back(Message);
 					break;
 				}
 				case tcp_common::message_type::MARK: {
-					std::cout << "Mark message received"<<std::endl;
-					int x = 0;
-					int y = 0;
-					for (int i = 0; i < 4; i++) {
-						int temp = (int)Message.MsgBody[i];
-						int temp2 = (int)Message.MsgBody[i + 4];
-						temp = temp << (i*8);
-						temp2 = temp2 << (i * 8);
-						x = x | temp;
-						y = y | temp2;
-					}
-					std::cout << "value of x is " << x << std::endl;
-					std::cout << "value of y is " << y << std::endl;
+					tcp_common::decode_data(Header, Message.MsgBody);
 					break;
 				}
 				}
+				
+			}
+			if (Server->GameCreationMessage.size() >= 2) {
+				game::game_t Game;
+				Game.Id = Server->GameId++;
+				Game.ClientsIds.push_back(Server->GameCreationMessage[0].ClientId);
+				Game.ClientsIds.push_back(Server->GameCreationMessage[1].ClientId);
+				Game.GameState = game::game_state::ACTIVE;
+				Server->Games.push_back(Game);
+				std::vector<int> data;
+				data.push_back(Game.Id);
+				data.push_back(0);
+				Server->send_message(Game.ClientsIds[0], tcp_common::create_message(tcp_common::GAME_CREATED, data));
+				Server->send_message(Game.ClientsIds[1], tcp_common::create_message(tcp_common::GAME_CREATED, data));
+				Server->GameCreationMessage.pop_front();
+				Server->GameCreationMessage.pop_front();
 			}
 			Sleep(1);
 		}
