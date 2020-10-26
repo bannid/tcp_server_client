@@ -149,7 +149,7 @@ namespace net_client {
 		closesocket(ConnectSocket);
 		WSACleanup();
 	}
-	void client::on(tcp_common::message_type MessageType, std::function<void(void)> Callback) {
+	void client::on(tcp_common::message_type MessageType, event_callback Callback) {
 		bool found = false;
 		for (auto CallbackIt = this->MessageEvents.begin(); CallbackIt != this->MessageEvents.end(); CallbackIt++) {
 			if (CallbackIt->first == MessageType) {
@@ -187,6 +187,10 @@ namespace net_client {
 				}
 				case tcp_common::message_type::MARK: {
 					tcp_common::decode_data(Header, Message.MsgBody);
+					break;
+				}
+				case tcp_common::OTHER_PLAYER_LEFT: {
+					std::cout << "Other player has left the game" << std::endl;
 					break;
 				}
 				}

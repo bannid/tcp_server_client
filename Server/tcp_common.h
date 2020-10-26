@@ -18,13 +18,15 @@ namespace tcp_common {
 		LOSER,//No msg body
 		OTHER_PLAYER_LEFT,//No msg body
 		MARK,//Need to send the x and y coords
-		QUIT_GAME//No msg body
+		QUIT_GAME,
+		INVALID_GAME_ID
 	};
 	const int SIZE_OF_MESSAGE = sizeof(message_type) + sizeof(int) * 2;
 	struct client {
 		SOCKET Socket;
 		int Id;
 		bool Active = true;
+		bool ClosedGracefully = false;
 		std::vector<unsigned char> ByteStream;
 		int GameId = -1;
 	};
