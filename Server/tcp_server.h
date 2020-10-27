@@ -10,8 +10,8 @@
 #include <string>
 #include <deque>
 #include "tcp_common.h"
+#include "ts_vector.h"
 #include "Game.h"
-// Need to link with Ws2_32.lib
 
 namespace net_server {
 	enum errors {
@@ -32,20 +32,22 @@ namespace net_server {
 		bool start(const char* PortNumber);
 		bool listen_on_port();
 		void stop();
-		void cleanup();
 		bool send_message(tcp_common::client Client,
 			std::vector<unsigned char> msg);
 		void brodcast_message();
 		void add_client(tcp_common::client Client);
+		void deactivate_client(int ClientId, bool ClosedGracefully);
 		void close_inactive_clients();
 		void close_all_clients();
-		void set_client_game(int ClientId, int GameId);
-		void set_client_game_thread_unsafe(int ClientId, int GameId);
+		void set_client_game(int ClientId, int GameId, game::player_type Side);
+		void set_client_game_thread_unsafe(int ClientId, int GameId, game::player_type Side);
 		
 		bool get_client(int ClientId, tcp_common::client& Output);
 		bool get_client_thread_unsafe(int ClientId, tcp_common::client& Output);
 		
 		bool get_game(int Id, game::game_t& Game);
+		void push_message(tcp_common::msg Message);
+		tcp_common::msg pop_front_message();
 	private:
 		WSADATA WSAData;
 		SOCKET ListenSocket;
@@ -108,6 +110,19 @@ namespace net_server {
 		}
 		freeaddrinfo(Result);
 	}
+
+	void server::push_message(tcp_common::msg Message) {
+		std::lock_guard<std::mutex> LocalGuard(this->MessageMutex);
+		this->Messages.push_back(Message);
+	}
+
+	tcp_common::msg server::pop_front_message() {
+		std::lock_guard<std::mutex> LocalGuard(this->MessageMutex);
+		tcp_common::msg ToReturn = *this->Messages.begin();
+		this->Messages.pop_front();
+		return ToReturn;
+	}
+
 	bool server::listen_on_port() {
 		this->ClientProcessingThread = std::thread(process_clients, this);
 		this->MessageProcessingThread = std::thread(process_messages, this);
@@ -153,19 +168,21 @@ namespace net_server {
 		}
 		return false;
 	}
-	void server::set_client_game(int ClientId, int GameId) {
+	void server::set_client_game(int ClientId, int GameId, game::player_type Side) {
 		std::lock_guard<std::mutex> LocalGuard(this->ClientsMutex);
 		for (auto ClientIt = this->Clients.begin(); ClientIt != this->Clients.end(); ClientIt++) {
 			if (ClientIt->Id == ClientId) {
 				ClientIt->GameId = GameId;
+				ClientIt->Side = Side;
 				break;
 			}
 		}
 	}
-	void server::set_client_game_thread_unsafe(int ClientId, int GameId) {
+	void server::set_client_game_thread_unsafe(int ClientId, int GameId, game::player_type Side) {
 		for (auto ClientIt = this->Clients.begin(); ClientIt != this->Clients.end(); ClientIt++) {
 			if (ClientIt->Id == ClientId) {
 				ClientIt->GameId = GameId;
+				ClientIt->Side = Side;
 				break;
 			}
 		}
@@ -209,8 +226,8 @@ namespace net_server {
 							if (get_client_thread_unsafe(*It2, Client) &&
 								Client.Active) {
 								//Reset the game for client so that he can join
-								//another game.
-								this->set_client_game_thread_unsafe(*It2, -1);
+								//another game. Player type doesnt matter
+								this->set_client_game_thread_unsafe(*It2, -1,game::player_type::CIRCLE);
 								this->send_message(Client, tcp_common::create_message(tcp_common::message_type::OTHER_PLAYER_LEFT, Data));
 							}
 						}
@@ -222,6 +239,15 @@ namespace net_server {
 		}
 		for (auto It = IteratorsToRemove.begin(); It != IteratorsToRemove.end(); It++) {
 			this->Clients.erase(*It);
+		}
+	}
+	void server::deactivate_client(int Id, bool ClosedGracefully) {
+		std::lock_guard<std::mutex> LocalGuard(this->ClientsMutex);
+		for (auto ClientIt = this->Clients.begin(); ClientIt != this->Clients.end(); ClientIt++) {
+			if (ClientIt->Id == Id) {
+				ClientIt->Active = false;
+				ClientIt->ClosedGracefully = ClosedGracefully;
+			}
 		}
 	}
 	void server::close_all_clients() {
@@ -241,15 +267,11 @@ namespace net_server {
 		}
 	}
 	void server::stop() {
-		//TODO: Stop all the clients sockets as well
 		this->Running = false;
 		this->ClientProcessingThread.join();
 		this->MessageProcessingThread.join();
 		close_all_clients();
 		WSACleanup();
-	}
-	void server::cleanup() {
-		
 	}
 	void server::add_client(tcp_common::client Client) {
 		std::lock_guard<std::mutex> LocalGuard(this->ClientsMutex);
@@ -272,7 +294,7 @@ namespace net_server {
 			BytesSent = send(Client.Socket, (const char*)Ptr, BytesToSend - BytesSent, 0);
 			if (BytesSent == SOCKET_ERROR) {
 				std::cout << "Send failed with error: " << WSAGetLastError();
-				Client.Active = false;
+				this->deactivate_client(Client.Id,false);
 				return false;
 			}
 			Ptr += BytesSent;
@@ -303,14 +325,14 @@ namespace net_server {
 				}
 				else if (Result == 0) {
 					std::cout << "Connection closing...\n";
-					Server->Clients[i].Active = false;
-					Server->Clients[i].ClosedGracefully = true;
+					Server->deactivate_client(Server->Clients[i].Id, true);
 				}
 				else if (WSAGetLastError() != WSAEWOULDBLOCK) {
 					std::cout << "recv failed with error: " << WSAGetLastError();
-					Server->Clients[i].Active = false;
+					Server->deactivate_client(Server->Clients[i].Id, false);
 				}
 				if (Server->Clients[i].Active) {
+					//Process the messages
 					while (Server->Clients[i].ByteStream.size() >= tcp_common::SIZE_OF_MESSAGE) {
 						int HeaderSize = sizeof(tcp_common::message_type);
 						tcp_common::msg Message;
@@ -319,9 +341,7 @@ namespace net_server {
 							Message.MsgBody.push_back(Server->Clients[i].ByteStream[k]);
 						}
 						Message.ClientId = Server->Clients[i].Id;
-						Server->MessageMutex.lock();
-						Server->Messages.push_back(Message);
-						Server->MessageMutex.unlock();
+						Server->push_message(Message);
 						auto Begin = Server->Clients[i].ByteStream.begin();
 						Server->Clients[i].ByteStream.erase(Begin, Begin + tcp_common::SIZE_OF_MESSAGE);
 					}
@@ -335,14 +355,7 @@ namespace net_server {
 		while (Server->Running.load()) {
 			tcp_common::msg Message;
 			if (Server->Messages.size() > 0) {
-				Server->MessageMutex.lock();
-				auto MessageTemp = Server->Messages.begin();
-				Message.ClientId = MessageTemp->ClientId;
-				Message.MsgBody = MessageTemp->MsgBody;
-				Message.Header = MessageTemp->Header;
-				Server->Messages.pop_front();
-				Server->MessageMutex.unlock();
-
+				Message = Server->pop_front_message();
 				tcp_common::message_type Header = Message.Header;
 				switch (Header) {
 				case tcp_common::message_type::CREATE_GAME: {
@@ -350,32 +363,41 @@ namespace net_server {
 					break;
 				}
 				case tcp_common::message_type::MARK: {
-					tcp_common::decode_data(Header, Message.MsgBody);
+					std::vector<int> Data = tcp_common::decode_data(Header, Message.MsgBody);
+					std::cout << "Mark message received. Value of x and y is: " << Data[0] << ", " << Data[1];
 					break;
 				}
 				}
 
 			}
+			//Create games
 			if (Server->GameCreationMessage.size() >= 2) {
+				//TODO: We have to see if the both clients are active.
+				//If one or both are inactive remove the messages and continue processing.
+				tcp_common::client ClientFirst;
+				tcp_common::client ClientSecond;
+
 				game::game_t Game;
 				Game.Id = Server->GameId++;
 				Game.ClientsIds.push_back(Server->GameCreationMessage[0].ClientId);
 				Game.ClientsIds.push_back(Server->GameCreationMessage[1].ClientId);
 				Game.GameState = game::game_state::ACTIVE;
 				Server->Games.push_back(Game);
-				std::vector<int> data;
-				data.push_back(Game.Id);
-				data.push_back(0);
-				Server->set_client_game(Game.ClientsIds[0], Game.Id);
-				Server->set_client_game(Game.ClientsIds[1], Game.Id);
+				Server->set_client_game(Game.ClientsIds[0], Game.Id, game::player_type::CIRCLE);
+				Server->set_client_game(Game.ClientsIds[1], Game.Id,game::player_type::CROSS);
 
-				tcp_common::client ClientFirst;
-				tcp_common::client ClientSecond;
 				
 				if (Server->get_client(Game.ClientsIds[0], ClientFirst) && ClientFirst.Active) {
+					std::vector<int> data;
+					data.push_back(Game.Id);
+					data.push_back(ClientFirst.Side);
+
 					Server->send_message(ClientFirst, tcp_common::create_message(tcp_common::GAME_CREATED, data));
 				}
 				if (Server->get_client(Game.ClientsIds[1], ClientSecond) && ClientSecond.Active) {
+					std::vector<int> data;
+					data.push_back(Game.Id);
+					data.push_back(ClientSecond.Side);
 					Server->send_message(ClientSecond, tcp_common::create_message(tcp_common::GAME_CREATED, data));
 				}
 				Server->GameCreationMessage.pop_front();

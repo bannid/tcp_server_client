@@ -121,6 +121,7 @@
     <ClInclude Include="Game.h" />
     <ClInclude Include="tcp_common.h" />
     <ClInclude Include="tcp_server.h" />
+    <ClInclude Include="ts_vector.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

@@ -4,6 +4,8 @@
 #include <ws2tcpip.h>
 #include <vector>
 #include <stdint.h>
+#include "Game.h"
+
 #pragma comment (lib, "Ws2_32.lib")
 #pragma comment (lib, "Mswsock.lib")
 #pragma comment (lib, "AdvApi32.lib")
@@ -29,6 +31,7 @@ namespace tcp_common {
 		bool ClosedGracefully = false;
 		std::vector<unsigned char> ByteStream;
 		int GameId = -1;
+		game::player_type Side;
 	};
 	struct msg {
 		tcp_common::message_type Header;
@@ -63,8 +66,8 @@ namespace tcp_common {
 		switch (MessageType) {
 		case message_type::MARK: {
 			std::cout << "Mark message received" << std::endl;
-			int x = 0;
-			int y = 0;
+			int x = 3;
+			int y = 2;
 			x = parse_int_from_bytes(&data[0]);
 			y = parse_int_from_bytes(&data[4]);
 			std::cout << "value of x is " << x << std::endl;
@@ -76,9 +79,12 @@ namespace tcp_common {
 		case message_type::GAME_CREATED: {
 			std::cout << "Game created message received" << std::endl;
 			int GameId = 0;
+			int Side;
 			GameId = parse_int_from_bytes(&data[0]);
+			Side = parse_int_from_bytes(&data[4]);
 			std::cout << "Game ID is: " << GameId << std::endl;
 			ToReturn.push_back(GameId);
+			ToReturn.push_back(Side);
 			return ToReturn;
 
 		}

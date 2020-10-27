@@ -11,13 +11,11 @@
 #include <deque>
 #include <mutex>
 #include <thread>
+#include <atomic>
 #include <tcp_common.h>
 
 namespace net_client {
-	enum errors {
-
-	};
-	typedef std::function<void(void)> event_callback;
+	typedef std::function<void(std::vector<int>) > event_callback;
 	class client;
 	static void process_messages(client * Client);
 	class client {
@@ -27,12 +25,16 @@ namespace net_client {
 		bool send_message(std::vector<unsigned char > Message);
 		bool listen_on_port();
 		void stop();
-		void on(tcp_common::message_type Type, std::function<void(void)> Callback);
+		void on(tcp_common::message_type Type, event_callback Callback);
+		void push_message(tcp_common::msg Message);
+		tcp_common::msg pop_front_message();
 	private:
 		WSADATA wsaData;
 		SOCKET ConnectSocket = INVALID_SOCKET;
 		struct addrinfo *result = NULL,
 			hints;
+	public:
+		std::atomic<bool> Running = true;
 	public:
 		std::map <tcp_common::message_type, std::vector<event_callback>> MessageEvents;
 	public:
@@ -42,7 +44,6 @@ namespace net_client {
 		std::deque<tcp_common::msg> Messages;
 		std::vector<unsigned char> ByteStream;
 	private:
-		errors Error;
 		int ErrorCode;
 	};
 	bool client::initialize() {
@@ -87,6 +88,16 @@ namespace net_client {
 			return false;
 		}
 		return true;
+	}
+	void client::push_message(tcp_common::msg Message) {
+		std::lock_guard<std::mutex> LocalGuard(this->MessagesMutex);
+		this->Messages.push_back(Message);
+	}
+	tcp_common::msg client::pop_front_message() {
+		std::lock_guard<std::mutex> LocalGuard(this->MessagesMutex);
+		tcp_common::msg Message = this->Messages[0];
+		this->Messages.pop_front();
+		return Message;
 	}
 	bool client::send_message(std::vector<unsigned char> Message) {
 		unsigned char * Ptr = (unsigned char*)Message.data();
@@ -133,18 +144,18 @@ namespace net_client {
 				for (int k = HeaderSize; k < tcp_common::SIZE_OF_MESSAGE; k++) {
 					Message.MsgBody.push_back(this->ByteStream[k]);
 				}
-				this->MessagesMutex.lock();
-				this->Messages.push_back(Message);
-				this->MessagesMutex.unlock();
+				this->push_message(Message);
 				auto Begin = this->ByteStream.begin();
 				this->ByteStream.erase(Begin, Begin + tcp_common::SIZE_OF_MESSAGE);
 			}
 
 
-		} while (ErrorCode > 0);
+		} while (ErrorCode > 0 && this->Running.load());
 		return true;
 	}
 	void client::stop() {
+		this->Running = false;
+		this->MessageProcessingThread.join();
 		shutdown(ConnectSocket, SD_SEND);
 		closesocket(ConnectSocket);
 		WSACleanup();
@@ -161,39 +172,24 @@ namespace net_client {
 		if (!found) {
 			std::vector<event_callback> temp;
 			temp.push_back(Callback);
-			this->MessageEvents.insert({MessageType,temp});
+			this->MessageEvents.insert({ MessageType,temp });
 		}
 	}
 	static void process_messages(client * Client) {
-		while (1) {
+		while (Client->Running.load()) {
 			tcp_common::msg Message;
 			if (Client->Messages.size() > 0) {
-				Client->MessagesMutex.lock();
-				Message = *Client->Messages.begin();
-				Client->Messages.pop_front();
-				Client->MessagesMutex.unlock();
+				Message = Client->pop_front_message();
 				tcp_common::message_type Header = Message.Header;
-				switch (Header) {
-				case tcp_common::message_type::GAME_CREATED: {
-					tcp_common::decode_data(Header, Message.MsgBody);
-					for (auto CallbackIt = Client->MessageEvents.begin(); CallbackIt != Client->MessageEvents.end(); CallbackIt++) {
-						if (CallbackIt->first == Header) {
-							for (auto CallbacksIt = CallbackIt->second.begin(); CallbacksIt != CallbackIt->second.end(); CallbacksIt++) {
-								(*CallbacksIt)();
-							}
+				std::vector<int> Data = tcp_common::decode_data(Header, Message.MsgBody);
+				for (auto CallbackIt = Client->MessageEvents.begin(); CallbackIt != Client->MessageEvents.end(); CallbackIt++) {
+					if (CallbackIt->first == Header) {
+						for (auto CallbacksIt = CallbackIt->second.begin(); CallbacksIt != CallbackIt->second.end(); CallbacksIt++) {
+							(*CallbacksIt)(Data);
 						}
 					}
-					break;
 				}
-				case tcp_common::message_type::MARK: {
-					tcp_common::decode_data(Header, Message.MsgBody);
-					break;
-				}
-				case tcp_common::OTHER_PLAYER_LEFT: {
-					std::cout << "Other player has left the game" << std::endl;
-					break;
-				}
-				}
+
 			}
 			Sleep(1);
 		}
