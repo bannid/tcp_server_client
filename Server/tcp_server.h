@@ -9,6 +9,7 @@
 #include <iostream>
 #include <string>
 #include <deque>
+#include <assert.h>
 #include "tcp_common.h"
 #include "ts_vector.h"
 #include "Game.h"
@@ -48,6 +49,7 @@ namespace net_server {
 		bool get_client_thread_unsafe(int ClientId, tcp_common::client& Output);
 		int get_number_of_clients();
 		bool get_game(int Id, game::game_t& Game);
+		bool mark_on_game(int Id,int x, int y, game::player_type Side);
 		void push_message(tcp_common::msg Message);
 		tcp_common::msg pop_front_message();
 	private:
@@ -83,7 +85,7 @@ namespace net_server {
 			1000,
 			NULL,
 			NULL,
-			NULL
+			SEMAPHORE_ALL_ACCESS
 		);
 		ErrorCode = WSAStartup(MAKEWORD(2, 2), &WSAData);
 		if (ErrorCode != 0) {
@@ -178,6 +180,25 @@ namespace net_server {
 		}
 		return false;
 	}
+
+	bool server::mark_on_game(int Id, int x, int y, game::player_type Side) {
+		for (auto It = this->Games.begin(); It != this->Games.end(); It++) {
+			if (It->Id == Id) {
+				char c;
+				if (Side == game::player_type::CIRCLE) {
+					c = 'O';
+				}
+				else {
+					c = 'X';
+				}
+				It->Board[y * 3 + x] = c;
+				It->NumberOfMoves++;
+				return true;
+			}
+		}
+		return false;
+	}
+	
 	void server::set_client_game(int ClientId, int GameId, game::player_type Side) {
 		std::lock_guard<std::mutex> LocalGuard(this->ClientsMutex);
 		for (auto ClientIt = this->Clients.begin(); ClientIt != this->Clients.end(); ClientIt++) {
@@ -281,6 +302,8 @@ namespace net_server {
 	}
 	void server::stop() {
 		this->Running = false;
+		//Release the semaphore so the waiting threads can exit.
+		ReleaseSemaphore(this->MessageSemaphore, 1, 0);
 		this->ClientProcessingThread.join();
 		this->MessageProcessingThread.join();
 		close_all_clients();
@@ -367,7 +390,11 @@ namespace net_server {
 	}
 	static void process_messages(server * Server) {
 		while (Server->Running.load()) {
-			WaitForSingleObjectEx(Server->MessageSemaphore, INFINITE, NULL);
+			DWORD Status = WaitForSingleObject(Server->MessageSemaphore, INFINITE);
+
+			if (Status == 0xFFFFFFFF) {
+				assert(0);
+			}
 			tcp_common::msg Message;
 			if (Server->Messages.size() > 0) {
 				Message = Server->pop_front_message();
@@ -407,6 +434,29 @@ namespace net_server {
 				case tcp_common::message_type::MARK: {
 					std::vector<int> Data = tcp_common::decode_data(Header, Message.MsgBody);
 					std::cout << "Mark message received. Value of x and y is: " << Data[0] << ", " << Data[1];
+					int x = Data[0];
+					int y = Data[1];
+					if (x > 2 || x < 0 || y > 2 || y < 0) {
+
+					}
+					else {
+						tcp_common::client Client;
+						if (Server->get_client(Message.ClientId, Client)) {
+							if (Server->mark_on_game(Client.GameId, x, y, Client.Side)) {
+								game::game_t Game;
+								Server->get_game(Client.GameId, Game);
+								for (int i = 0; i < 2; i++) {
+									if (Game.ClientsIds[i] != Client.Id) {
+										tcp_common::client Client2;
+										if (Server->get_client(Game.ClientsIds[i], Client2)) {
+											Server->send_message(Client2,
+												tcp_common::create_message(tcp_common::message_type::MARK, Data));
+										}
+									}
+								}
+							}
+						}
+					}
 					break;
 				}
 				}
@@ -450,7 +500,6 @@ namespace net_server {
 				else if (!ClientSecondFound || !ClientSecond.Active) {
 					Server->GameCreationMessage.erase(Server->GameCreationMessage.begin() + 1);
 				}
-				
 			}
 		}
 	}

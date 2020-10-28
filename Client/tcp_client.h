@@ -54,7 +54,7 @@ namespace net_client {
 			1000,
 			NULL,
 			NULL,
-			NULL
+			SEMAPHORE_ALL_ACCESS
 		);
 		this->MessageProcessingThread = std::thread(process_messages, this);
 		// Initialize Winsock
@@ -165,6 +165,8 @@ namespace net_client {
 	}
 	void client::stop() {
 		this->Running = false;
+		//Release the semaphore so the waiting threads can exit.
+		ReleaseSemaphore(this->MessageSemaphore, 1, 0);
 		this->MessageProcessingThread.join();
 		shutdown(ConnectSocket, SD_SEND);
 		closesocket(ConnectSocket);
@@ -187,7 +189,7 @@ namespace net_client {
 	}
 	static void process_messages(client * Client) {
 		while (Client->Running.load()) {
-			WaitForSingleObjectEx(Client->MessageSemaphore, INFINITE, NULL);
+		    DWORD Status = WaitForSingleObjectEx(Client->MessageSemaphore, INFINITE, NULL);
 			tcp_common::msg Message;
 			if (Client->Messages.size() > 0) {
 				Message = Client->pop_front_message();
