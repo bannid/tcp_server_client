@@ -71,7 +71,7 @@ namespace net_client {
 	}
 	bool client::connect_to_server(const char* IpAddress, const char* PortNumber) {
 		// Resolve the server address and port
-		ErrorCode = getaddrinfo("127.0.0.1", "27015", &hints, &result);
+		ErrorCode = getaddrinfo(IpAddress, PortNumber, &hints, &result);
 		if (ErrorCode != 0) {
 			std::cout << "getaddrinfo failed with error: " << ErrorCode << std::endl;
 			return false;
@@ -117,7 +117,7 @@ namespace net_client {
 			int ErrorCode = send(ConnectSocket, (char*)Ptr, Size - BytesSent, 0);
 			if (ErrorCode == SOCKET_ERROR) {
 				std::cout << "send failed with error: " << WSAGetLastError() << std::endl;
-				return false;
+				this->stop();
 			}
 			BytesSent += ErrorCode;
 			Ptr += ErrorCode;
