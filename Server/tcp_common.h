@@ -14,6 +14,7 @@ namespace tcp_common {
 		CREATE_GAME, //No msg body
 		GAME_CREATED, //Need to send the game id.
 		GAME_ALREADY_EXISTS,//Need to send the game id.
+		GAME_REQUEST_EXISTS,
 		GAME_FINISHED,//No msg body.
 		WINNER,//No message needed
 		DRAW,//No msg body

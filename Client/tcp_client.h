@@ -38,6 +38,7 @@ namespace net_client {
 	public:
 		std::map <tcp_common::message_type, std::vector<event_callback>> MessageEvents;
 	public:
+		HANDLE MessageSemaphore;
 		std::mutex MessagesMutex;
 		std::thread MessageProcessingThread;
 	public:
@@ -47,11 +48,19 @@ namespace net_client {
 		int ErrorCode;
 	};
 	bool client::initialize() {
+		this->MessageSemaphore = CreateSemaphoreExA(
+			NULL,
+			0,
+			1000,
+			NULL,
+			NULL,
+			NULL
+		);
 		this->MessageProcessingThread = std::thread(process_messages, this);
 		// Initialize Winsock
 		ErrorCode = WSAStartup(MAKEWORD(2, 2), &wsaData);
 		if (ErrorCode != 0) {
-			printf("WSAStartup failed with error: %d\n", ErrorCode);
+			std::cout << "WSAStartup failed with error: " << ErrorCode << std::endl;
 			return false;
 		}
 
@@ -64,7 +73,7 @@ namespace net_client {
 		// Resolve the server address and port
 		ErrorCode = getaddrinfo("127.0.0.1", "27015", &hints, &result);
 		if (ErrorCode != 0) {
-			printf("getaddrinfo failed with error: %d\n", ErrorCode);
+			std::cout << "getaddrinfo failed with error: " << ErrorCode << std::endl;
 			return false;
 		}
 		// Create a SOCKET for connecting to server
@@ -72,7 +81,7 @@ namespace net_client {
 			result->ai_protocol);
 		if (ConnectSocket == INVALID_SOCKET) {
 			ErrorCode = WSAGetLastError();
-			printf("socket failed with error: %ld\n", WSAGetLastError());
+			std::cout << "socket failed with error: " << WSAGetLastError() << std::endl;
 			return false;
 		}
 		// Connect to server.
@@ -84,7 +93,7 @@ namespace net_client {
 
 		freeaddrinfo(result);
 		if (ConnectSocket == INVALID_SOCKET) {
-			printf("Unable to connect to server!\n");
+			std::cout << "Unable to connect to server!" << std::endl;
 			return false;
 		}
 		return true;
@@ -107,7 +116,7 @@ namespace net_client {
 			// Send an initial buffer
 			int ErrorCode = send(ConnectSocket, (char*)Ptr, Size - BytesSent, 0);
 			if (ErrorCode == SOCKET_ERROR) {
-				printf("send failed with error: %d\n", WSAGetLastError());
+				std::cout << "send failed with error: " << WSAGetLastError() << std::endl;
 				return false;
 			}
 			BytesSent += ErrorCode;
@@ -125,16 +134,16 @@ namespace net_client {
 
 			ErrorCode = recv(ConnectSocket, recvbuf, recvbuflen, 0);
 			if (ErrorCode > 0) {
-				printf("Bytes received: %d\n", ErrorCode);
+				std::cout << "Bytes received: " << ErrorCode << std::endl;
 				for (int i = 0; i < ErrorCode; i++) {
 					this->ByteStream.push_back(recvbuf[i]);
 				}
 			}
 			else if (ErrorCode == 0) {
-				printf("Connection closed\n");
+				std::cout << "Connection closed\n" << std::endl;
 			}
 			else {
-				printf("recv failed with error: %d\n", WSAGetLastError());
+				std::cout << "recv failed with error: " << WSAGetLastError() << std::endl;
 				return false;
 			}
 			while (this->ByteStream.size() >= tcp_common::SIZE_OF_MESSAGE) {
@@ -145,6 +154,7 @@ namespace net_client {
 					Message.MsgBody.push_back(this->ByteStream[k]);
 				}
 				this->push_message(Message);
+				ReleaseSemaphore(this->MessageSemaphore, 1, 0);
 				auto Begin = this->ByteStream.begin();
 				this->ByteStream.erase(Begin, Begin + tcp_common::SIZE_OF_MESSAGE);
 			}
@@ -177,6 +187,7 @@ namespace net_client {
 	}
 	static void process_messages(client * Client) {
 		while (Client->Running.load()) {
+			WaitForSingleObjectEx(Client->MessageSemaphore, INFINITE, NULL);
 			tcp_common::msg Message;
 			if (Client->Messages.size() > 0) {
 				Message = Client->pop_front_message();
@@ -189,9 +200,7 @@ namespace net_client {
 						}
 					}
 				}
-
 			}
-			Sleep(1);
 		}
 	}
 }

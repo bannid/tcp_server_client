@@ -28,7 +28,7 @@ int main(void) {
 			break;
 		}
 		case 2: {
-			std::cout << "Total number of clients is: " << Server.Clients.size() << std::endl;
+			std::cout << "Total number of clients is: " << Server.get_number_of_clients() << std::endl;
 			break;
 		}
 		case 3: {
