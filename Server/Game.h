@@ -21,6 +21,7 @@ namespace game {
 			' ',' ',' ',
 			' ',' ',' '
 		};
+		bool GameOver = false;
 	};
 	void reset_game(game_t* Game) {
 		Game->Id = -1;
@@ -29,6 +30,7 @@ namespace game {
 		}
 		Game->NumberOfMoves = 0;
 		Game->GameState = game_state::NOT_ACTIVE;
+		Game->GameOver = false;
 	}
 	void print_game(game_t* Game) {
 		for (int i = 0; i < 3; i++) {

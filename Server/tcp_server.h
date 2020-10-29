@@ -29,9 +29,11 @@ namespace net_server {
 	class server;
 	static void process_messages(server * Server);
 	static void process_clients(server * Server);
+	static void process_games(server * Server);
 	class server {
 		friend void process_messages(server * Server);
 		friend void process_clients(server * Server);
+		friend void process_games(server * Server);
 	public:
 		bool start(const char* PortNumber);
 		bool listen_on_port();
@@ -45,14 +47,15 @@ namespace net_server {
 		void close_all_clients();
 		void set_client_game(int ClientId, int GameId, game::player_type Side);
 		void set_client_game_thread_unsafe(int ClientId, int GameId, game::player_type Side);
-		
+
 		bool get_client(int ClientId, tcp_common::client& Output);
 		bool get_client_thread_unsafe(int ClientId, tcp_common::client& Output);
 		int get_number_of_clients();
 		bool get_game(int Id, game::game_t& Game);
-		bool mark_on_game(int Id,int x, int y, game::player_type Side);
+		bool mark_on_game(int Id, int x, int y, game::player_type Side);
 		void push_message(tcp_common::msg Message);
 		tcp_common::msg pop_front_message();
+		void push_game(game::game_t Game);
 		errors get_last_error();
 		errors Error = errors::SUCCESS;
 		int ErrorCode;
@@ -62,27 +65,37 @@ namespace net_server {
 		SOCKET ClientSocket;
 		struct addrinfo *Result = NULL;
 		struct addrinfo Hints;
-		
+
 
 	public:
 		std::atomic<bool> Running = true;
 	private:
 		HANDLE MessageSemaphore;
+		HANDLE GamesSempahore;
 		int ClientId = 0;
 		int GameId = 0;
 		std::thread ClientProcessingThread;
 		std::thread MessageProcessingThread;
+		std::thread GamesProcessingThread;
 	private:
 		std::mutex ClientsMutex;
 		std::vector<tcp_common::client> Clients;
 		std::mutex MessageMutex;
-		std::mutex GameCreationMessageMutex;
 		std::deque<tcp_common::msg> Messages;
 		std::deque<tcp_common::msg> GameCreationMessage;
+		std::mutex GamesMutex;
 		std::vector<game::game_t> Games;
 	};
 	bool server::start(const char* portNumber) {
 		this->MessageSemaphore = CreateSemaphoreExA(
+			NULL,
+			0,
+			1000,
+			NULL,
+			NULL,
+			SEMAPHORE_ALL_ACCESS
+		);
+		this->GamesSempahore = CreateSemaphoreExA(
 			NULL,
 			0,
 			1000,
@@ -140,6 +153,10 @@ namespace net_server {
 		std::lock_guard<std::mutex> LocalGuard(this->MessageMutex);
 		this->Messages.push_back(Message);
 	}
+	void server::push_game(game::game_t Game) {
+		std::lock_guard<std::mutex> LocalGuard(this->GamesMutex);
+		this->Games.push_back(Game);
+	}
 
 	tcp_common::msg server::pop_front_message() {
 		std::lock_guard<std::mutex> LocalGuard(this->MessageMutex);
@@ -151,6 +168,7 @@ namespace net_server {
 	bool server::listen_on_port() {
 		this->ClientProcessingThread = std::thread(process_clients, this);
 		this->MessageProcessingThread = std::thread(process_messages, this);
+		this->GamesProcessingThread = std::thread(process_games, this);
 		SOCKADDR_IN AddrIn;
 		int AddrLength = sizeof(AddrIn);
 		while (this->Running.load() == true) {
@@ -210,7 +228,7 @@ namespace net_server {
 		}
 		return false;
 	}
-	
+
 	void server::set_client_game(int ClientId, int GameId, game::player_type Side) {
 		std::lock_guard<std::mutex> LocalGuard(this->ClientsMutex);
 		for (auto ClientIt = this->Clients.begin(); ClientIt != this->Clients.end(); ClientIt++) {
@@ -273,7 +291,7 @@ namespace net_server {
 								Client.Active) {
 								//Reset the game for client so that he can join
 								//another game. Player type doesnt matter
-								this->set_client_game_thread_unsafe(*It2, -1,game::player_type::CIRCLE);
+								this->set_client_game_thread_unsafe(*It2, -1, game::player_type::CIRCLE);
 								this->send_message(Client, tcp_common::create_message(tcp_common::message_type::OTHER_PLAYER_LEFT, Data));
 							}
 						}
@@ -306,7 +324,7 @@ namespace net_server {
 				}
 				closesocket(ClientIt->Socket);
 			}
-			else{
+			else {
 				shutdown(ClientIt->Socket, SD_SEND);
 				closesocket(ClientIt->Socket);
 			}
@@ -316,8 +334,16 @@ namespace net_server {
 		this->Running = false;
 		//Release the semaphore so the waiting threads can exit.
 		ReleaseSemaphore(this->MessageSemaphore, 1, 0);
-		this->ClientProcessingThread.join();
-		this->MessageProcessingThread.join();
+		ReleaseSemaphore(this->GamesSempahore, 1, 0);
+		if (this->ClientProcessingThread.joinable()) {
+			this->ClientProcessingThread.join();
+		}
+		if (this->MessageProcessingThread.joinable()) {
+			this->MessageProcessingThread.join();
+		}
+		if (this->GamesProcessingThread.joinable()) {
+			this->GamesProcessingThread.join();
+		}
 		close_all_clients();
 		WSACleanup();
 	}
@@ -342,7 +368,7 @@ namespace net_server {
 			BytesSent = send(Client.Socket, (const char*)Ptr, BytesToSend - BytesSent, 0);
 			if (BytesSent == SOCKET_ERROR) {
 				std::cout << "Send failed with error: " << WSAGetLastError();
-				this->deactivate_client(Client.Id,false);
+				this->deactivate_client(Client.Id, false);
 				return false;
 			}
 			Ptr += BytesSent;
@@ -463,6 +489,7 @@ namespace net_server {
 										if (Server->get_client(Game.ClientsIds[i], Client2)) {
 											Server->send_message(Client2,
 												tcp_common::create_message(tcp_common::message_type::MARK, Data));
+											ReleaseSemaphore(Server->GamesSempahore, 1, 0);
 										}
 									}
 								}
@@ -472,7 +499,6 @@ namespace net_server {
 					break;
 				}
 				}
-
 			}
 			//Create games
 			if (Server->GameCreationMessage.size() >= 2) {
@@ -482,8 +508,8 @@ namespace net_server {
 				tcp_common::client ClientSecond;
 				bool ClientFirstFound = Server->get_client(Server->GameCreationMessage[0].ClientId, ClientFirst);
 				bool ClientSecondFound = Server->get_client(Server->GameCreationMessage[1].ClientId, ClientSecond);
-				if ( ClientFirstFound &&
-					 ClientSecondFound &&
+				if (ClientFirstFound &&
+					ClientSecondFound &&
 					ClientFirst.Active &&
 					ClientSecond.Active) {
 					game::game_t Game;
@@ -491,7 +517,8 @@ namespace net_server {
 					Game.ClientsIds.push_back(Server->GameCreationMessage[0].ClientId);
 					Game.ClientsIds.push_back(Server->GameCreationMessage[1].ClientId);
 					Game.GameState = game::game_state::ACTIVE;
-					Server->Games.push_back(Game);
+					Server->push_game(Game);
+					ReleaseSemaphore(Server->GamesSempahore, 1, 0);
 					Server->set_client_game(Game.ClientsIds[0], Game.Id, game::player_type::CIRCLE);
 					Server->set_client_game(Game.ClientsIds[1], Game.Id, game::player_type::CROSS);
 					std::vector<int> data1;
@@ -512,6 +539,121 @@ namespace net_server {
 				else if (!ClientSecondFound || !ClientSecond.Active) {
 					Server->GameCreationMessage.erase(Server->GameCreationMessage.begin() + 1);
 				}
+			}
+		}
+	}
+	static void process_games(server * Server) {
+		int WinningPatterns[] = {
+					0,0, 1,0 ,2,0,
+					0,1, 1,1 ,2,1,
+					0,2, 1,2 ,2,2,
+
+					0,0, 0,1, 0,2,
+					1,0, 1,1, 1,2,
+					2,0, 2,1, 2,2,
+
+					0,0, 1,1, 2,2,
+					0,2, 1,1, 2,0
+
+		};
+		while (Server->Running.load()) {
+			DWORD Status = WaitForSingleObject(Server->GamesSempahore, INFINITE);
+			if (Status == 0xFFFFFFFF) {
+				assert(0);
+			}
+			std::lock_guard<std::mutex> LocalGuard(Server->GamesMutex);
+			std::vector<std::vector<game::game_t>::iterator> GamesToRemove;
+			for (int i = 0; i < Server->Games.size(); i++) {
+				bool GameWon = false;
+				//Check if the game is won
+				for (int j = 0; j < ARRAYSIZE(WinningPatterns); j += 6) {
+					int XFirstIndex = j;
+					int XSecondIndex = j + 2;
+					int XThirdIndex = j + 4;
+					int YFirstIndex = j + 1;
+					int YSecondIndex = j + 3;
+					int YThirdIndex = j + 5;
+
+					int XFirst = WinningPatterns[XFirstIndex];
+					int XSecond = WinningPatterns[XSecondIndex];
+					int XThird = WinningPatterns[XThirdIndex];
+
+					int YFirst = WinningPatterns[YFirstIndex];
+					int YSecond = WinningPatterns[YSecondIndex];
+					int YThird = WinningPatterns[YThirdIndex];
+
+					assert(XFirst >= 0 && XFirst <= 2);
+					assert(XSecond >= 0 && XSecond <= 2);
+					assert(XThird >= 0 && XThird <= 2);
+
+					assert(YFirst >= 0 && YFirst <= 2);
+					assert(YSecond >= 0 && YSecond <= 2);
+					assert(YThird >= 0 && YThird <= 2);
+
+					if (Server->Games[i].Board[XFirst + YFirst * 3] == Server->Games[i].Board[XSecond + YSecond * 3] &&
+						Server->Games[i].Board[XSecond + YSecond * 3] == Server->Games[i].Board[XThird + YThird * 3] &&
+						Server->Games[i].Board[XFirst + YFirst * 3] != ' ') {
+						std::cout << "[Debug]Game has been won!\n";
+						char C = Server->Games[i].Board[XFirst + YFirst * 3];
+						game::player_type WinnerType = C == 'X' ? game::player_type::CROSS : game::player_type::CIRCLE;
+						tcp_common::client Client;
+						if (Server->get_client(Server->Games[i].ClientsIds[0], Client)) {
+							std::vector<int> Data;
+							Data.push_back(0);
+							Data.push_back(0);
+							if (Client.Side == WinnerType) {
+								Server->send_message(Client, tcp_common::create_message(tcp_common::WINNER, Data));
+							}
+							else {
+								Server->send_message(Client, tcp_common::create_message(tcp_common::LOSER, Data));
+							}
+						}
+						if (Server->get_client(Server->Games[i].ClientsIds[1], Client)) {
+							std::vector<int> Data;
+							Data.push_back(0);
+							Data.push_back(0);
+							if (Client.Side == WinnerType) {
+								Server->send_message(Client, tcp_common::create_message(tcp_common::WINNER, Data));
+							}
+							else {
+								Server->send_message(Client, tcp_common::create_message(tcp_common::LOSER, Data));
+							}
+						}
+						GamesToRemove.push_back(Server->Games.begin() + i);
+						GameWon = true;
+						break;
+					}
+				}
+				//If the game is won, then no need for further processing.
+				if (GameWon)break;
+
+				bool GameOver = true;
+				for (int jk = 0; jk < 9; jk++) {
+					GameOver = !(Server->Games[i].Board[jk] == ' ');
+					if (!GameOver) {
+						break;
+					}
+				}
+				if (GameOver) {
+					std::cout << "[Debug]Game is drawn!\n";
+					GamesToRemove.push_back(Server->Games.begin() + i);
+					tcp_common::client Client;
+					std::vector<int> Data;
+					Data.push_back(0);
+					Data.push_back(0);
+					if (Server->get_client(Server->Games[i].ClientsIds[0], Client)) {
+						Server->send_message(Client, tcp_common::create_message(tcp_common::message_type::DRAW, Data));
+					}
+					if (Server->get_client(Server->Games[i].ClientsIds[1], Client)) {
+						Server->send_message(Client, tcp_common::create_message(tcp_common::message_type::DRAW, Data));
+					}
+				}
+			}
+			//Remove the won and drawn games.
+			for (auto It = GamesToRemove.begin(); It != GamesToRemove.end(); It++) {
+				Server->set_client_game((*It)->ClientsIds[0], -1, game::player_type::CIRCLE);
+				Server->set_client_game((*It)->ClientsIds[1], -1, game::player_type::CIRCLE);
+				Server->Games.erase(*It);
 			}
 		}
 	}
