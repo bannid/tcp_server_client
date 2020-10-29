@@ -15,7 +15,7 @@
 #include <tcp_common.h>
 
 namespace net_client {
-	typedef std::function<void(std::vector<int>) > event_callback;
+	typedef std::function<void(std::vector<int>)> event_callback;
 	class client;
 	static void process_messages(client * Client);
 	class client {
@@ -118,6 +118,7 @@ namespace net_client {
 			if (ErrorCode == SOCKET_ERROR) {
 				std::cout << "send failed with error: " << WSAGetLastError() << std::endl;
 				this->stop();
+				return false;
 			}
 			BytesSent += ErrorCode;
 			Ptr += ErrorCode;
@@ -161,13 +162,15 @@ namespace net_client {
 
 
 		} while (ErrorCode > 0 && this->Running.load());
-		return true;
+		return ErrorCode >= 0;
 	}
 	void client::stop() {
 		this->Running = false;
 		//Release the semaphore so the waiting threads can exit.
 		ReleaseSemaphore(this->MessageSemaphore, 1, 0);
-		this->MessageProcessingThread.join();
+		if (this->MessageProcessingThread.joinable()) {
+			this->MessageProcessingThread.join();
+		}
 		shutdown(ConnectSocket, SD_SEND);
 		closesocket(ConnectSocket);
 		WSACleanup();
@@ -187,6 +190,7 @@ namespace net_client {
 			this->MessageEvents.insert({ MessageType,temp });
 		}
 	}
+	//Running on different thread
 	static void process_messages(client * Client) {
 		while (Client->Running.load()) {
 		    DWORD Status = WaitForSingleObjectEx(Client->MessageSemaphore, INFINITE, NULL);

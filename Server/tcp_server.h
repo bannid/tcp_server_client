@@ -22,7 +22,8 @@ namespace net_server {
 		LISTEN_FAILED,
 		BIND_FAILED,
 		ACCEPT_FAILED,
-		ASYNC_CREATION_FAILED
+		ASYNC_CREATION_FAILED,
+		SUCCESS
 	};
 
 	class server;
@@ -52,14 +53,16 @@ namespace net_server {
 		bool mark_on_game(int Id,int x, int y, game::player_type Side);
 		void push_message(tcp_common::msg Message);
 		tcp_common::msg pop_front_message();
+		errors get_last_error();
+		errors Error = errors::SUCCESS;
+		int ErrorCode;
 	private:
 		WSADATA WSAData;
 		SOCKET ListenSocket;
 		SOCKET ClientSocket;
 		struct addrinfo *Result = NULL;
 		struct addrinfo Hints;
-		errors Error;
-		int ErrorCode;
+		
 
 	public:
 		std::atomic<bool> Running = true;
@@ -89,6 +92,7 @@ namespace net_server {
 		);
 		ErrorCode = WSAStartup(MAKEWORD(2, 2), &WSAData);
 		if (ErrorCode != 0) {
+			std::cout << "[Debug]WSA initialization failed\n";
 			Error = errors::WSA_STARTUP_FAILED;
 			return false;
 		}
@@ -101,12 +105,14 @@ namespace net_server {
 		// Resolve the server address and port
 		ErrorCode = getaddrinfo(NULL, portNumber, &Hints, &Result);
 		if (ErrorCode != 0) {
+			std::cout << "[Debug]Address resolution failed\n";
 			Error = errors::ADDRESS_RESO_FAILED;
 			WSACleanup();
 			return false;
 		}
 		ListenSocket = socket(Result->ai_family, Result->ai_socktype, Result->ai_protocol);
 		if (ListenSocket == INVALID_SOCKET) {
+			std::cout << "[Debug]Creation of listen socket failed\n";
 			freeaddrinfo(Result);
 			Error = LISTEN_SOCKET_FAILED;
 			ErrorCode = WSAGetLastError();
@@ -114,6 +120,7 @@ namespace net_server {
 		}
 		ErrorCode = bind(ListenSocket, Result->ai_addr, (int)Result->ai_addrlen);
 		if (ErrorCode == SOCKET_ERROR) {
+			std::cout << "[Debug]Binding listen socket failed failed\n";
 			Error = errors::BIND_FAILED;
 			ErrorCode = WSAGetLastError();
 			freeaddrinfo(Result);
@@ -122,6 +129,11 @@ namespace net_server {
 			return false;
 		}
 		freeaddrinfo(Result);
+		return true;
+	}
+
+	errors server::get_last_error() {
+		return this->Error;
 	}
 
 	void server::push_message(tcp_common::msg Message) {

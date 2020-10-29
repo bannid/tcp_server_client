@@ -11,6 +11,14 @@ int main(void) {
 		if (success) {
 			Server.listen_on_port();
 		}
+		else {
+			net_server::errors Error = Server.get_last_error();
+			switch (Error) {
+			case net_server::errors::WSA_STARTUP_FAILED: {
+				std::cout << "WSA_STARTUP_FAILED with error code " << Server.Error << std::endl;
+			}
+			}
+		}
 		std::cout << "Exiting thread..";
 	});
 	//Temp code to debug server
@@ -38,5 +46,7 @@ int main(void) {
 		}
 		}
 	}
-	Thread.join();
+	if (Thread.joinable()) {
+		Thread.join();
+	}
 }
